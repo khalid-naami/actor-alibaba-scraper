@@ -1,0 +1,18 @@
+{
+  "actorOutputSchemaVersion": 1,
+  "title": "Alibaba B2B Wholesale Scraper (MOQ, Bulk Price Tiers & Suppliers) Output",
+  "properties": {
+    "results": {
+      "type": "string",
+      "title": "Dataset Records",
+      "description": "Scraped records stored in the default Apify dataset.",
+      "template": "{{links.apiDefaultDatasetUrl}}/items"
+    },
+    "overview": {
+      "type": "string",
+      "title": "Executive Summary Payload",
+      "description": "High-level summary report and execution metrics stored in Key-Value store.",
+      "template": "{{links.apiDefaultKeyValueStoreUrl}}/records/OUTPUT"
+    }
+  }
+}
