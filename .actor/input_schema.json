@@ -1,0 +1,51 @@
+{
+  "title": "Alibaba Scraper Input",
+  "type": "object",
+  "schemaVersion": 1,
+  "properties": {
+    "productUrls": {
+      "title": "Direct Alibaba Product URLs",
+      "type": "array",
+      "description": "List of direct product detail URLs from alibaba.com.",
+      "prefill": [
+        "https://www.alibaba.com/product-detail/Wholesale-Custom-Logo-Bamboo-Cutting-Board_1600123456789.html"
+      ],
+      "editor": "json"
+    },
+    "searchKeywords": {
+      "title": "Search Keywords",
+      "type": "array",
+      "description": "Keywords to search on Alibaba for wholesale products and factories (e.g. 'bamboo cutting board', 'wireless earbuds').",
+      "editor": "json"
+    },
+    "verifiedSupplierOnly": {
+      "title": "Verified Suppliers Only",
+      "type": "boolean",
+      "description": "Filter search results to show only inspected and Verified Suppliers.",
+      "default": false
+    },
+    "tradeAssuranceOnly": {
+      "title": "Trade Assurance Only",
+      "type": "boolean",
+      "description": "Filter search results to show only products covered by Alibaba Trade Assurance.",
+      "default": false
+    },
+    "maxProducts": {
+      "title": "Max Products Per Search",
+      "type": "integer",
+      "description": "Maximum number of product records to extract per keyword.",
+      "default": 40,
+      "minimum": 1,
+      "maximum": 500
+    },
+    "proxyConfiguration": {
+      "title": "Proxy Configuration",
+      "type": "object",
+      "description": "Use Apify Residential or Datacenter Proxy to bypass Alibaba anti-scraping protections.",
+      "default": {
+        "useApifyProxy": true
+      },
+      "editor": "proxy"
+    }
+  }
+}
