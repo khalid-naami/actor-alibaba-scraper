@@ -1,0 +1,16 @@
+{
+  "actorSpecification": 1,
+  "name": "alibaba-scraper",
+  "title": "Alibaba B2B Wholesale Scraper (MOQ, Bulk Price Tiers & Suppliers)",
+  "description": "Alibaba Scraper: Extract B2B wholesale products, tiered bulk price ranges, Minimum Order Quantities (MOQ), Verified Supplier credentials, Trade Assurance badges, lead times, and specifications. Perfect for global sourcing intelligence, supply chain procurement, and competitor benchmarking.",
+  "version": "1.0",
+  "meta": {
+    "templateId": "js-crawlee-playwright"
+  },
+  "dockerfile": "../Dockerfile",
+  "input": "./input_schema.json",
+  "storages": {
+    "dataset": "./dataset_schema.json"
+  },
+  "output": "./output_schema.json"
+}
