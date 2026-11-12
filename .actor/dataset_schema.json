@@ -1,0 +1,100 @@
+{
+  "actorSpecification": 1,
+  "fields": {
+    "type": "object",
+    "properties": {
+      "productId": {
+        "type": "string",
+        "description": "Unique Alibaba Product Identifier"
+      },
+      "title": {
+        "type": "string",
+        "description": "Full product title"
+      },
+      "priceRange": {
+        "type": "string",
+        "description": "Formatted price range string (e.g. $4.50 - $6.20 / Piece)"
+      },
+      "minPrice": {
+        "type": "number",
+        "description": "Lowest bulk price tier"
+      },
+      "maxPrice": {
+        "type": "number",
+        "description": "Highest single-tier price"
+      },
+      "currency": {
+        "type": "string",
+        "description": "Currency code (USD, EUR, etc.)"
+      },
+      "moq": {
+        "type": "string",
+        "description": "Minimum Order Quantity formatted (e.g. '100 Pieces')"
+      },
+      "moqNumber": {
+        "type": "integer",
+        "description": "Numeric Minimum Order Quantity"
+      },
+      "bulkPricing": {
+        "type": "array",
+        "description": "Tiered volume pricing structure by quantity ranges"
+      },
+      "supplierName": {
+        "type": "string",
+        "description": "Manufacturing company or trading supplier name"
+      },
+      "supplierYears": {
+        "type": "string",
+        "description": "Years operating on Alibaba (e.g. '8 yrs')"
+      },
+      "supplierCountry": {
+        "type": "string",
+        "description": "Country of origin code or name"
+      },
+      "isVerified": {
+        "type": "boolean",
+        "description": "Verified Supplier or Verified Pro badge"
+      },
+      "hasTradeAssurance": {
+        "type": "boolean",
+        "description": "Alibaba Trade Assurance order protection eligible"
+      },
+      "reviewScore": {
+        "type": "number",
+        "description": "Average review or supplier rating score (0.0 to 5.0)"
+      },
+      "reviewsCount": {
+        "type": "integer",
+        "description": "Total customer reviews and transaction ratings"
+      },
+      "leadTime": {
+        "type": "string",
+        "description": "Production and delivery lead time schedule"
+      },
+      "customization": {
+        "type": "array",
+        "description": "OEM/ODM customization options (Logo, Packaging, Graphic)"
+      },
+      "specifications": {
+        "type": "object",
+        "description": "Technical product specifications and attributes table"
+      },
+      "thumbnail": {
+        "type": "string",
+        "description": "Primary high-resolution product image"
+      },
+      "images": {
+        "type": "array",
+        "description": "Full gallery of high-resolution product photos"
+      },
+      "url": {
+        "type": "string",
+        "description": "Canonical Alibaba product URL"
+      },
+      "scrapedAt": {
+        "type": "string",
+        "description": "Timestamp of extraction"
+      }
+    }
+  }
+}
