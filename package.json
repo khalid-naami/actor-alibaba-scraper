@@ -1,0 +1,32 @@
+{
+  "name": "actor-alibaba-scraper",
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Scrape Alibaba B2B products, wholesale bulk price tiers, MOQ (Minimum Order Quantity), supplier credentials, Trade Assurance, and factory specs at scale.",
+  "main": "src/main.js",
+  "scripts": {
+    "start": "node src/main.js",
+    "test": "node --check src/main.js && node --check src/extractors.js"
+  },
+  "dependencies": {
+    "apify": "^3.2.6",
+    "crawlee": "^3.11.5",
+    "got-scraping": "^4.0.7",
+    "playwright": "1.65.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "keywords": [
+    "alibaba",
+    "alibaba-scraper",
+    "b2b-sourcing",
+    "wholesale",
+    "moq-lookup",
+    "supplier-intelligence",
+    "amazon-fba-sourcing",
+    "apify-actor"
+  ],
+  "author": "Apify Developer",
+  "license": "Apache-2.0"
+}
