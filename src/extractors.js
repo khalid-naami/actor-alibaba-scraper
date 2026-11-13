@@ -15,10 +15,11 @@ export function extractAlibabaProductId(url) {
  * Clean numeric price from string
  */
 export function parseAlibabaPrice(raw) {
+    if (typeof raw === 'number') return Number.isFinite(raw) ? raw : null;
     if (!raw || typeof raw !== 'string') return null;
     const cleaned = raw.replace(/[^\d.]/g, '');
     const num = parseFloat(cleaned);
-    return isNaN(num) ? null : num;
+    return Number.isFinite(num) ? num : null;
 }
 
 /**
@@ -132,9 +133,9 @@ export function parseAlibabaProductHtml(html, url = '') {
         reviewScore = parseFloat(scoreMatch[1]);
     }
 
-    const countMatch = html.match(/(\d+)\s*(?:Reviews|Ratings|reviews)/i);
+    const countMatch = html.match(/(\d[\d,]*)\s*(?:Reviews|Ratings|reviews)/i);
     if (countMatch) {
-        reviewsCount = parseInt(countMatch[1], 10);
+        reviewsCount = parseInt(countMatch[1].replace(/,/g, ''), 10) || 0;
     }
 
     // Lead Time
