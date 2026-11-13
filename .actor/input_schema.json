@@ -6,16 +6,17 @@
     "productUrls": {
       "title": "Direct Alibaba Product URLs",
       "type": "array",
-      "description": "List of direct product detail URLs from alibaba.com.",
-      "prefill": [
-        "https://www.alibaba.com/product-detail/Wholesale-Custom-Logo-Bamboo-Cutting-Board_1600123456789.html"
-      ],
+      "description": "List of direct product detail URLs from alibaba.com (if provided, scrapes these product pages directly).",
+      "prefill": [],
       "editor": "json"
     },
     "searchKeywords": {
       "title": "Search Keywords",
       "type": "array",
       "description": "Keywords to search on Alibaba for wholesale products and factories (e.g. 'bamboo cutting board', 'wireless earbuds').",
+      "prefill": [
+        "bamboo cutting board"
+      ],
       "editor": "json"
     },
     "verifiedSupplierOnly": {
