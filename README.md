@@ -25,7 +25,7 @@ Extract live Alibaba wholesale products, tiered volume pricing, Minimum Order Qu
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `productUrls` | Array | `[]` | List of direct Alibaba product detail URLs. |
-| `searchKeywords` | Array | `["bamboo cutting board"]` | Keywords to search on Alibaba (falls back to this keyword if both `productUrls` and `searchKeywords` are empty). |
+| `searchKeywords` | Array | `["sunglasses", "mens pants", "baseball cap"]` | Keywords to search on Alibaba (falls back to `["sunglasses"]` if both `productUrls` and `searchKeywords` are empty). |
 | `verifiedSupplierOnly` | Boolean | `false` | Filter search results to only verified manufacturing suppliers. |
 | `tradeAssuranceOnly` | Boolean | `false` | Filter search results to products with Trade Assurance protection. |
 | `maxProducts` | Integer | `40` | Maximum products to extract per search keyword. |
