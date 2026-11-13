@@ -7,7 +7,7 @@
  */
 export function extractAlibabaProductId(url) {
     if (!url || typeof url !== 'string') return null;
-    const match = url.match(/_(\d{8,})\.html/) || url.match(/productId=(\d{8,})/) || url.match(/\/(\d{8,})\.html/);
+    const match = url.match(/(?:_|-|\/)(\d{8,})\.html?/i) || url.match(/productId=(\d{8,})/i);
     return match ? match[1] : null;
 }
 
@@ -46,25 +46,44 @@ export function detectAlibabaPageState(html, statusCode = 200) {
     if (!html || typeof html !== 'string' || html.trim().length < 20) {
         return { state: 'empty_body', reason: 'Empty or near-empty HTML response' };
     }
-    const lower = html.toLowerCase();
+
+    // Avoid false positives when real 200 OK product/SERP pages bundle Alibaba WAF SDK scripts
+    const visibleLower = html
+        .replace(/<script[\s\S]*?<\/script>/gi, ' ')
+        .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+        .toLowerCase();
+    const rawLower = html.toLowerCase();
+    const hasProductSignals =
+        rawLower.includes('window.detaildata') ||
+        rawLower.includes('window.__page__data') ||
+        rawLower.includes('window._page_data_') ||
+        rawLower.includes('/product-detail/') ||
+        rawLower.includes('"@type":"product"') ||
+        /<h1[^>]*class="[^"]*(?:product-title|module-pdp-title)/i.test(html);
+
     if (
-        lower.includes('<punish-component') ||
-        lower.includes('sufei-punish') ||
-        lower.includes('baxia-punish') ||
-        lower.includes('sec.alibaba.com') ||
-        lower.includes('rgv587_flag') ||
-        lower.includes('captcha-title')
+        visibleLower.includes('<punish-component') ||
+        visibleLower.includes('captcha-title') ||
+        (!hasProductSignals && (
+            rawLower.includes('<punish-component') ||
+            rawLower.includes('sufei-punish') ||
+            rawLower.includes('baxia-punish') ||
+            rawLower.includes('sec.alibaba.com/punish') ||
+            rawLower.includes('rgv587_flag') ||
+            /"action"\s*:\s*"captcha"/i.test(html)
+        ))
     ) {
         return {
             state: 'antibot_challenge',
             reason: 'Alibaba anti-bot/CAPTCHA gate detected (punish/baxia); Residential Proxy required',
         };
     }
+
     const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
     const pageTitle = titleMatch ? titleMatch[1].replace(/\s+/g, ' ').trim() : '';
     if (
         /product not available|page not found|sorry, this item is no longer available/i.test(pageTitle) ||
-        (/product not available/i.test(html) && !html.includes('product-title') && !html.includes('module-pdp-title'))
+        (/product not available/i.test(visibleLower) && !hasProductSignals)
     ) {
         return {
             state: 'unavailable',
@@ -534,9 +553,6 @@ export function parseAlibabaSearchHtml(html) {
     const results = [];
     if (!html || typeof html !== 'string') return results;
 
-    const stateCheck = detectAlibabaPageState(html, 200);
-    if (stateCheck.state === 'antibot_challenge') return results;
-
     const seenKeys = new Set();
     const pushUnique = (item) => {
         if (!item || !item.title) return;
@@ -643,14 +659,14 @@ export function parseAlibabaSearchHtml(html) {
 
     // Layer 3: Anchor fallback for SSR catalog pages (e.g., /products/*.html)
     if (results.length === 0) {
-        const anchorRegex = /<a[^>]*href="([^"]*\/product-detail\/[^"]+?_\d{8,}\.html[^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
+        const anchorRegex = /<a[^>]*href="([^"]*\/product-detail\/[^"]+?(?:_|\/|-)\d{8,}\.html?[^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
         for (const m of html.matchAll(anchorRegex)) {
             const cleanUrl = normalizeUrl(m[1])?.split('?')[0];
             const productId = extractAlibabaProductId(cleanUrl);
-            const titleAttr = m[0].match(/title="([^"]{12,})"/i)?.[1] || m[0].match(/alt="([^"]{12,})"/i)?.[1];
+            const titleAttr = m[0].match(/title="([^"]{10,})"/i)?.[1] || m[0].match(/alt="([^"]{10,})"/i)?.[1];
             const innerTitle = m[2].replace(/<[^>]+>/g, ' ').trim();
             const title = decodeHtmlEntities(titleAttr || innerTitle);
-            if (!productId || !title || title.length < 12) continue;
+            if (!productId || !title || title.length < 10) continue;
             pushUnique({
                 productId,
                 title,
