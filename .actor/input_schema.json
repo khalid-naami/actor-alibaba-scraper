@@ -13,9 +13,11 @@
     "searchKeywords": {
       "title": "Search Keywords",
       "type": "array",
-      "description": "Keywords to search on Alibaba for wholesale products and factories (e.g. 'bamboo cutting board', 'wireless earbuds').",
+      "description": "Keywords to search on Alibaba for wholesale products and factories (e.g. 'sunglasses', 'mens pants', 'baseball cap').",
       "prefill": [
-        "bamboo cutting board"
+        "sunglasses",
+        "mens pants",
+        "baseball cap"
       ],
       "editor": "json"
     },
