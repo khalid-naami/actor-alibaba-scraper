@@ -101,14 +101,16 @@ try {
         }
     };
 
+    let proxyFailureCount = 0;
     const rotateOrDisableProxy = async (reason) => {
         if (!proxyEnabled && !isProxyTransportError(reason)) return;
+        proxyFailureCount++;
         await closeBrowser();
-        if (proxyConfig && isProxyTransportError(reason)) {
+        if (proxyConfig && isProxyTransportError(reason) && proxyFailureCount <= 1) {
             try {
                 proxyUrl = await proxyConfig.newUrl();
                 proxyEnabled = Boolean(proxyUrl);
-                log.warning('Rotated Apify Proxy session after transport error.');
+                log.warning(`Rotated Apify Proxy session (attempt ${proxyFailureCount}) after transport error.`);
                 return;
             } catch {
                 // Fall through to disable proxy
@@ -117,7 +119,7 @@ try {
         if (proxyUrl !== undefined) {
             proxyUrl = undefined;
             proxyEnabled = false;
-            log.warning('Disabled broken proxy session; falling back to direct connection.');
+            log.warning('Disabled failing proxy session; falling back to direct connection.');
         }
     };
 
