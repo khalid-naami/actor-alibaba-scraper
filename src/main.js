@@ -35,13 +35,29 @@ function isProxyTransportError(errOrStatus) {
         errOrStatus === 597 ||
         errOrStatus === 407 ||
         errOrStatus === 502 ||
-        /597|UPSTREAM407|407|Proxy responded with|tunneling socket|ERR_PROXY|ERR_TUNNEL|ECONNRESET/i.test(msg)
+        /597|UPSTREAM407|407|Proxy responded with|tunneling socket|ERR_PROXY|ERR_TUNNEL|ECONNRESET|ECONNREFUSED/i.test(msg)
     );
+}
+
+function parsePlaywrightProxy(proxyUrl) {
+    if (!proxyUrl) return undefined;
+    try {
+        const u = new URL(proxyUrl);
+        const proxy = {
+            server: `${u.protocol}//${u.hostname}${u.port ? `:${u.port}` : ''}`,
+        };
+        if (u.username) proxy.username = decodeURIComponent(u.username);
+        if (u.password) proxy.password = decodeURIComponent(u.password);
+        return proxy;
+    } catch {
+        return { server: proxyUrl };
+    }
 }
 
 await Actor.init();
 
-let browser = null;
+let activeBrowser = null;
+let hasFailed = false;
 const diagnostics = [];
 let totalProductsScraped = 0;
 let verifiedSuppliersCount = 0;
@@ -49,7 +65,7 @@ let tradeAssuranceCount = 0;
 
 Actor.on('aborting', async () => {
     try {
-        if (browser) await browser.close().catch(() => {});
+        if (activeBrowser) await activeBrowser.close().catch(() => {});
         await Actor.setValue('OUTPUT', {
             totalProductsScraped,
             verifiedSuppliersCount,
@@ -77,80 +93,30 @@ try {
 
     log.info('Starting Alibaba B2B Wholesale & Supplier Scraper...');
 
-    // Setup Proxy
     let proxyConfig = null;
-    let proxyUrl = undefined;
-    let proxyEnabled = false;
+    let proxyTransportBlocked = false;
     if (proxyConfiguration) {
         try {
             proxyConfig = await Actor.createProxyConfiguration(proxyConfiguration);
             if (proxyConfig) {
-                proxyUrl = await proxyConfig.newUrl();
-                proxyEnabled = Boolean(proxyUrl);
-                log.info('Apify Proxy enabled');
+                log.info('Apify Proxy enabled', {
+                    groups: proxyConfig.groups || [],
+                    countryCode: proxyConfig.countryCode || null,
+                    isManInTheMiddle: Boolean(proxyConfig.isManInTheMiddle),
+                });
             }
         } catch (proxyErr) {
             log.warning(`Proxy initialization failed (${proxyErr.message}); continuing with direct connection.`);
         }
     }
 
-    const closeBrowser = async () => {
-        if (browser) {
-            await browser.close().catch(() => {});
-            browser = null;
+    const getFreshProxyUrl = async () => {
+        if (!proxyConfig || proxyTransportBlocked) return undefined;
+        try {
+            return await proxyConfig.newUrl();
+        } catch {
+            return undefined;
         }
-    };
-
-    let proxyFailureCount = 0;
-    const rotateOrDisableProxy = async (reason) => {
-        if (!proxyEnabled || !isProxyTransportError(reason)) return false;
-        proxyFailureCount++;
-        await closeBrowser();
-        if (proxyConfig && proxyFailureCount <= 1) {
-            try {
-                proxyUrl = await proxyConfig.newUrl();
-                proxyEnabled = Boolean(proxyUrl);
-                log.warning(`Rotated Apify Proxy session (attempt ${proxyFailureCount}) after transport error.`);
-                return true;
-            } catch {
-                // Fall through to disable proxy
-            }
-        }
-        if (proxyUrl !== undefined) {
-            proxyUrl = undefined;
-            proxyEnabled = false;
-            log.warning('Disabled failing proxy session; falling back to direct connection.');
-            return true;
-        }
-        return false;
-    };
-
-    const getBrowser = async () => {
-        if (!browser) {
-            const launchOptions = {
-                headless: true,
-                args: [
-                    '--no-sandbox',
-                    '--disable-setuid-sandbox',
-                    '--disable-dev-shm-usage',
-                    '--disable-blink-features=AutomationControlled',
-                ],
-            };
-            if (proxyUrl) {
-                try {
-                    const u = new URL(proxyUrl);
-                    launchOptions.proxy = {
-                        server: `${u.protocol}//${u.hostname}${u.port ? `:${u.port}` : ''}`,
-                        ...(u.username ? { username: decodeURIComponent(u.username) } : {}),
-                        ...(u.password ? { password: decodeURIComponent(u.password) } : {}),
-                    };
-                } catch {
-                    launchOptions.proxy = { server: proxyUrl };
-                }
-            }
-            browser = await chromium.launch(launchOptions);
-        }
-        return browser;
     };
 
     const fetchHtmlWithHttp = async (url) => {
@@ -159,130 +125,257 @@ try {
         } catch {
             return { html: '', statusCode: 0, state: 'invalid_url', reason: `Invalid URL: ${url}` };
         }
-        let lastErr = null;
-        for (let attempt = 1; attempt <= 2; attempt++) {
+
+        const maxAttempts = proxyConfig && !proxyTransportBlocked ? 2 : 1;
+        let lastRes = { html: '', statusCode: 0, state: 'http_error', reason: 'HTTP request failed' };
+
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            const attemptProxyUrl = await getFreshProxyUrl();
             try {
                 const res = await gotScraping({
                     url,
-                    proxyUrl,
+                    proxyUrl: attemptProxyUrl,
                     headers: {
-                        'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
                         'accept-language': 'en-US,en;q=0.9',
-                        'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
+                        'accept-encoding': 'gzip, deflate, br',
+                        'sec-fetch-site': 'none',
                     },
+                    headerGeneratorOptions: {
+                        browsers: [{ name: 'chrome' }],
+                        operatingSystems: ['windows', 'linux'],
+                    },
+                    sessionToken: {},
+                    retry: { limit: 1 },
                     timeout: { request: 25000 },
                     throwHttpErrors: false,
                 });
+
                 if (isProxyTransportError(res.statusCode)) {
-                    const handled = await rotateOrDisableProxy(res.statusCode);
-                    if (handled) continue;
-                }
-                const body = res.body || '';
-                const stateInfo = detectAlibabaPageState(body, res.statusCode);
-                return { html: body, statusCode: res.statusCode, ...stateInfo };
-            } catch (err) {
-                lastErr = err;
-                if (isProxyTransportError(err)) {
-                    const handled = await rotateOrDisableProxy(err);
-                    if (handled) continue;
-                }
-                if (attempt === 1 && !/Invalid URL/i.test(String(err.message))) {
+                    log.warning(`HTTP proxy transport status ${res.statusCode}; switching to direct connection for remaining requests.`);
+                    proxyTransportBlocked = true;
                     continue;
                 }
-                break;
+
+                const body = res.body || '';
+                const stateInfo = detectAlibabaPageState(body, res.statusCode);
+                lastRes = { html: body, statusCode: res.statusCode, ...stateInfo };
+                if (stateInfo.state !== 'antibot_challenge') {
+                    return lastRes;
+                }
+            } catch (err) {
+                if (isProxyTransportError(err)) {
+                    log.warning(`Proxy transport error (${err.message}); switching to direct connection.`);
+                    proxyTransportBlocked = true;
+                }
+                lastRes = { html: '', statusCode: 0, state: 'http_error', reason: err.message };
             }
         }
-        return { html: '', statusCode: 0, state: 'http_error', reason: lastErr?.message || 'HTTP request failed' };
+        return lastRes;
     };
 
-    const fetchWithPlaywright = async (url, mode = 'product') => {
+    const safePageContent = async (page) => {
+        for (let i = 0; i < 3; i++) {
+            try {
+                return await page.content();
+            } catch (err) {
+                if (i === 2) throw err;
+                await page.waitForLoadState('domcontentloaded', { timeout: 5000 }).catch(() => {});
+                await page.waitForTimeout(500);
+            }
+        }
+        return '';
+    };
+
+    const runPlaywrightOnce = async (url, mode = 'product', attemptProxyUrl = undefined) => {
+        // Inside Apify's xvfb-run container, DISPLAY is set so Chromium can run non-headless (avoiding HeadlessChrome fingerprints)
+        const hasXvfbDisplay = process.platform === 'linux' && Boolean(process.env.DISPLAY);
+        const launchOptions = {
+            headless: !hasXvfbDisplay,
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-gpu',
+                '--disable-webgl',
+                '--disable-3d-apis',
+                '--disable-software-rasterizer',
+                '--disable-extensions',
+                '--no-first-run',
+                '--mute-audio',
+                '--ignore-certificate-errors',
+                '--ignore-certificate-errors-spki-list',
+                '--disable-blink-features=AutomationControlled',
+            ],
+        };
+        if (attemptProxyUrl) {
+            launchOptions.proxy = parsePlaywrightProxy(attemptProxyUrl);
+        }
+
+        const browser = await chromium.launch(launchOptions);
+        activeBrowser = browser;
+        try {
+            const browserVersion = browser.version() || '147.0.0.0';
+            const cleanUserAgent = `Mozilla/5.0 (${process.platform === 'linux' ? 'X11; Linux x86_64' : 'Windows NT 10.0; Win64; x64'}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${browserVersion} Safari/537.36`;
+
+            const context = await browser.newContext({
+                ignoreHTTPSErrors: true,
+                userAgent: cleanUserAgent,
+                locale: 'en-US',
+                viewport: { width: 1366, height: 768 },
+                extraHTTPHeaders: {
+                    'Accept-Language': 'en-US,en;q=0.9',
+                    'Referer': 'https://www.alibaba.com/',
+                },
+            });
+
+            await context.addInitScript(() => {
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+            });
+
+            const page = await context.newPage();
+            await page.route('**/*', (route) => {
+                const type = route.request().resourceType();
+                if (['image', 'media', 'font'].includes(type)) {
+                    return route.abort();
+                }
+                return route.continue();
+            });
+
+            const capturedJsonPayloads = [];
+            page.on('response', async (resp) => {
+                const rUrl = resp.url();
+                const ct = resp.headers()['content-type'] || '';
+                if (ct.includes('json') && /(search|offer|product|detail|icbu)/i.test(rUrl)) {
+                    try {
+                        const data = await resp.json();
+                        if (data && typeof data === 'object') capturedJsonPayloads.push(data);
+                    } catch {
+                        // Ignore non-JSON or streamed bodies
+                    }
+                }
+            });
+
+            const navResp = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 35000 });
+            const statusCode = navResp ? navResp.status() : 200;
+
+            const selector = mode === 'search'
+                ? '[data-offer-id], .fy23-search-card, .searchx-offer-item, a[href*="/product-detail/"], punish-component'
+                : 'h1, .product-title, .module-pdp-title, punish-component';
+            await page.waitForSelector(selector, { timeout: 12000 }).catch(() => {});
+            await page.waitForTimeout(1000);
+
+            const html = await safePageContent(page);
+            const domData = await page.evaluate(() => {
+                const out = { cards: [] };
+                const anchors = Array.from(document.querySelectorAll('a[href*="/product-detail/"]'));
+                for (const a of anchors.slice(0, 80)) {
+                    const href = a.href || a.getAttribute('href') || '';
+                    const card = a.closest('[data-offer-id], .fy23-search-card, .searchx-offer-item, .organic-gallery-offer, .list-no-v2-outer, div') || a.parentElement;
+                    const text = (a.innerText || a.getAttribute('title') || a.querySelector('img')?.getAttribute('alt') || '').trim();
+                    const cardText = card ? (card.innerText || '') : '';
+                    const img = card ? card.querySelector('img') : null;
+                    if (href && text.length > 8) {
+                        out.cards.push({
+                            url: href.split('?')[0],
+                            title: text,
+                            cardText: cardText.slice(0, 400),
+                            thumbnail: img ? (img.src || img.getAttribute('data-src')) : null,
+                        });
+                    }
+                }
+                return out;
+            }).catch(() => ({ cards: [] }));
+
+            const stateInfo = detectAlibabaPageState(html, statusCode);
+            return { html, statusCode, capturedJsonPayloads, domData, ...stateInfo };
+        } finally {
+            if (activeBrowser === browser) activeBrowser = null;
+            await browser.close().catch(() => {});
+        }
+    };
+
+    const fetchWithPlaywright = async (url, mode = 'product', extractCheck = null) => {
         try {
             new URL(url);
         } catch {
             return { html: '', statusCode: 0, capturedJsonPayloads: [], domData: { cards: [] }, state: 'invalid_url', reason: `Invalid URL: ${url}` };
         }
-        for (let attempt = 1; attempt <= 2; attempt++) {
-            let page = null;
-            let context = null;
+
+        const maxPwAttempts = proxyConfig && !proxyTransportBlocked ? 2 : 1;
+        let lastRes = { html: '', statusCode: 0, capturedJsonPayloads: [], domData: { cards: [] }, state: 'browser_error', reason: 'Playwright failed' };
+
+        for (let pwAttempt = 1; pwAttempt <= maxPwAttempts; pwAttempt++) {
+            const pwProxyUrl = await getFreshProxyUrl();
             try {
-                const b = await getBrowser();
-                context = await b.newContext({
-                    locale: 'en-US',
-                    viewport: { width: 1366, height: 768 },
-                    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36',
-                    extraHTTPHeaders: {
-                        'accept-language': 'en-US,en;q=0.9',
-                        'referer': 'https://www.alibaba.com/',
-                    },
-                });
-                await context.addInitScript(() => {
-                    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-                });
-                page = await context.newPage();
-                await page.route('**/*.{mp4,webm,avi,woff,woff2}', (route) => route.abort());
-
-                const capturedJsonPayloads = [];
-                page.on('response', async (resp) => {
-                    const rUrl = resp.url();
-                    const ct = resp.headers()['content-type'] || '';
-                    if (ct.includes('json') && /(search|offer|product|detail|icbu)/i.test(rUrl)) {
-                        try {
-                            const data = await resp.json();
-                            if (data && typeof data === 'object') capturedJsonPayloads.push(data);
-                        } catch {
-                            // Ignore unparseable/streamed responses
-                        }
-                    }
-                });
-
-                const response = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 35000 });
-                const statusCode = response ? response.status() : 200;
-
-                const selector = mode === 'search'
-                    ? '[data-offer-id], .fy23-search-card, .searchx-offer-item, a[href*="/product-detail/"], punish-component'
-                    : 'h1, .product-title, .module-pdp-title, punish-component';
-                await page.waitForSelector(selector, { timeout: 10000 }).catch(() => {});
-
-                const html = await page.content();
-                const domData = await page.evaluate(() => {
-                    const out = { cards: [] };
-                    const anchors = Array.from(document.querySelectorAll('a[href*="/product-detail/"]'));
-                    for (const a of anchors.slice(0, 80)) {
-                        const href = a.href || a.getAttribute('href') || '';
-                        const card = a.closest('[data-offer-id], .fy23-search-card, .searchx-offer-item, .organic-gallery-offer, .list-no-v2-outer, div') || a.parentElement;
-                        const text = (a.innerText || a.getAttribute('title') || '').trim();
-                        const cardText = card ? (card.innerText || '') : '';
-                        const img = card ? card.querySelector('img') : null;
-                        if (href && text.length > 8) {
-                            out.cards.push({
-                                url: href.split('?')[0],
-                                title: text,
-                                cardText: cardText.slice(0, 400),
-                                thumbnail: img ? (img.src || img.getAttribute('data-src')) : null,
-                            });
-                        }
-                    }
-                    return out;
-                }).catch(() => ({ cards: [] }));
-
-                await page.close();
-                await context.close();
-
-                const stateInfo = detectAlibabaPageState(html, statusCode);
-                return { html, statusCode, capturedJsonPayloads, domData, ...stateInfo };
-            } catch (err) {
-                if (page) await page.close().catch(() => {});
-                if (context) await context.close().catch(() => {});
-                if (isProxyTransportError(err) && attempt === 1) {
-                    await rotateOrDisableProxy(err);
-                    continue;
+                const res = await runPlaywrightOnce(url, mode, pwProxyUrl);
+                lastRes = res;
+                const hasItems = typeof extractCheck === 'function' ? extractCheck(res) : false;
+                if (hasItems || res.state === 'unavailable') {
+                    return res;
                 }
-                return { html: '', statusCode: 0, capturedJsonPayloads: [], domData: { cards: [] }, state: 'browser_error', reason: err.message };
+                if (pwAttempt < maxPwAttempts) {
+                    log.warning(`Playwright attempt ${pwAttempt}/${maxPwAttempts} yielded state=${res.state} (${res.reason}). Retrying with a fresh proxy IP...`);
+                    await new Promise((r) => setTimeout(r, 1200));
+                }
+            } catch (pwErr) {
+                if (isProxyTransportError(pwErr)) {
+                    proxyTransportBlocked = true;
+                }
+                lastRes = { html: '', statusCode: 0, capturedJsonPayloads: [], domData: { cards: [] }, state: 'browser_error', reason: pwErr.message };
+                if (pwAttempt < maxPwAttempts) {
+                    log.warning(`Playwright attempt ${pwAttempt}/${maxPwAttempts} failed (${pwErr.message}). Retrying...`);
+                    await new Promise((r) => setTimeout(r, 1200));
+                }
             }
         }
-        return { html: '', statusCode: 0, capturedJsonPayloads: [], domData: { cards: [] }, state: 'browser_error', reason: 'Playwright attempts exhausted' };
+        return lastRes;
     };
 
+    const extractSearchResultsFromPw = (pwRes) => {
+        let items = parseAlibabaSearchHtml(pwRes.html);
+
+        if (items.length === 0 && Array.isArray(pwRes.capturedJsonPayloads) && pwRes.capturedJsonPayloads.length > 0) {
+            const seenUrls = new Set();
+            for (const payload of pwRes.capturedJsonPayloads) {
+                for (const offer of collectOfferObjects(payload)) {
+                    const normalized = normalizeOfferNodeToSearchItem(offer);
+                    if (normalized && normalized.url && !seenUrls.has(normalized.url)) {
+                        seenUrls.add(normalized.url);
+                        items.push(normalized);
+                    }
+                }
+            }
+        }
+
+        if (items.length === 0 && pwRes.domData?.cards?.length > 0) {
+            const seen = new Set();
+            for (const card of pwRes.domData.cards) {
+                if (seen.has(card.url)) continue;
+                seen.add(card.url);
+                const priceHit = card.cardText.match(/(?:\$|US\s*\$)\s*[\d,.]+(?:\s*-\s*[\d,.]+)?/);
+                const moqHit = card.cardText.match(/(\d[\d,]*)\s*(?:pieces?|pcs|sets?|units?)/i);
+                const priceStr = priceHit ? priceHit[0] : null;
+                const moqStr = moqHit ? moqHit[0] : null;
+                items.push({
+                    productId: extractAlibabaProductId(card.url),
+                    title: card.title,
+                    priceRange: priceStr,
+                    minPrice: parseAlibabaPrice(priceStr),
+                    moq: moqStr,
+                    moqNumber: parseAlibabaMoq(moqStr),
+                    isVerified: /verified/i.test(card.cardText),
+                    hasTradeAssurance: /trade assurance/i.test(card.cardText),
+                    thumbnail: card.thumbnail && card.thumbnail.startsWith('//') ? `https:${card.thumbnail}` : card.thumbnail,
+                    url: card.url,
+                    scrapedAt: new Date().toISOString(),
+                });
+            }
+        }
+        return items;
+    };
+
+    // Route plain keywords accidentally passed in productUrls cleanly to search
     const rawProductUrlEntries = Array.isArray(productUrls) ? productUrls : [];
     const effectiveProductUrls = [];
     const keywordSet = new Set(
@@ -292,7 +385,7 @@ try {
     );
 
     for (const rawEntry of rawProductUrlEntries) {
-        const rawStr = (typeof rawEntry === 'string' ? rawEntry : rawEntry?.url || '').trim();
+        const rawStr = (typeof rawEntry === 'string' ? rawEntry : rawEntry?.url || '')?.trim();
         if (!rawStr) continue;
         const normalized = /^(?:www\.)?alibaba\.com\//i.test(rawStr) ? `https://${rawStr}` : rawStr;
         let parsed = null;
@@ -319,8 +412,6 @@ try {
         log.info(`Scraping ${effectiveProductUrls.length} direct Alibaba product URLs...`);
 
         for (const targetUrl of effectiveProductUrls) {
-            if (!targetUrl) continue;
-
             log.info(`Fetching Alibaba Product: ${targetUrl}`);
             let product = null;
 
@@ -332,15 +423,16 @@ try {
             let finalState = httpRes.state;
             let finalReason = httpRes.reason;
 
-            // Avoid wasting browser run if page is explicitly "Product Not Available" or invalid URL
             if ((!product || !product.title) && httpRes.state !== 'unavailable' && httpRes.state !== 'invalid_url') {
                 log.info(`Using browser fallback for Alibaba product: ${targetUrl}...`);
-                const pwRes = await fetchWithPlaywright(targetUrl, 'product');
-                finalState = pwRes.state;
-                finalReason = pwRes.reason;
-                if (pwRes.state === 'ok') {
-                    product = parseAlibabaProductHtml(pwRes.html, targetUrl);
-                }
+                const pwRes = await fetchWithPlaywright(
+                    targetUrl,
+                    'product',
+                    (res) => Boolean(parseAlibabaProductHtml(res.html, targetUrl)?.title)
+                );
+                product = parseAlibabaProductHtml(pwRes.html, targetUrl);
+                finalState = product?.title ? 'ok' : pwRes.state;
+                finalReason = product?.title ? 'OK' : pwRes.reason;
             }
 
             if (product && product.title) {
@@ -372,9 +464,9 @@ try {
 
             try {
                 const httpRes = await fetchHtmlWithHttp(searchUrl);
-                let results = httpRes.state === 'ok' ? parseAlibabaSearchHtml(httpRes.html) : [];
-                let finalState = httpRes.state;
-                let finalReason = httpRes.reason;
+                let results = parseAlibabaSearchHtml(httpRes.html);
+                let finalState = results.length > 0 ? 'ok' : httpRes.state;
+                let finalReason = results.length > 0 ? 'OK' : httpRes.reason;
 
                 // Try Alibaba SSR catalog page (/products/<slug>.html) when /trade/search returns an empty SPA shell
                 if (results.length === 0 && !verifiedSupplierOnly && !tradeAssuranceOnly && httpRes.state !== 'antibot_challenge') {
@@ -382,15 +474,13 @@ try {
                     if (slug) {
                         const catalogUrl = `https://www.alibaba.com/products/${slug}.html`;
                         const catalogRes = await fetchHtmlWithHttp(catalogUrl);
-                        if (catalogRes.state === 'ok') {
-                            const catalogItems = parseAlibabaSearchHtml(catalogRes.html);
-                            if (catalogItems.length > 0) {
-                                results = catalogItems;
-                                finalState = 'ok';
-                                finalReason = 'OK';
-                                log.info(`Extracted ${results.length} SSR search items via ${catalogUrl}`);
-                            }
-                        } else if (catalogRes.state === 'antibot_challenge') {
+                        const catalogItems = parseAlibabaSearchHtml(catalogRes.html);
+                        if (catalogItems.length > 0) {
+                            results = catalogItems;
+                            finalState = 'ok';
+                            finalReason = 'OK';
+                            log.info(`Extracted ${results.length} SSR search items via ${catalogUrl}`);
+                        } else if (catalogRes.state !== 'ok') {
                             finalState = catalogRes.state;
                             finalReason = catalogRes.reason;
                         }
@@ -398,54 +488,15 @@ try {
                 }
 
                 if (results.length === 0) {
-                    log.info(`Using browser fallback for Alibaba search: "${keyword}" (HTTP state=${httpRes.state})...`);
-                    const pwRes = await fetchWithPlaywright(searchUrl, 'search');
-                    finalState = pwRes.state;
-                    finalReason = pwRes.reason;
-
-                    if (pwRes.state === 'ok') {
-                        results = parseAlibabaSearchHtml(pwRes.html);
-
-                        // Enrich from passively captured XHR/JSON responses if SSR HTML was hydrated dynamically
-                        if (results.length === 0 && pwRes.capturedJsonPayloads.length > 0) {
-                            const seenUrls = new Set();
-                            for (const payload of pwRes.capturedJsonPayloads) {
-                                for (const offer of collectOfferObjects(payload)) {
-                                    const normalized = normalizeOfferNodeToSearchItem(offer);
-                                    if (normalized && normalized.url && !seenUrls.has(normalized.url)) {
-                                        seenUrls.add(normalized.url);
-                                        results.push(normalized);
-                                    }
-                                }
-                            }
-                        }
-
-                        // Live DOM fallback if embedded JSON & CSS card regexes missed dynamic classes
-                        if (results.length === 0 && pwRes.domData?.cards?.length > 0) {
-                            const seen = new Set();
-                            for (const card of pwRes.domData.cards) {
-                                if (seen.has(card.url)) continue;
-                                seen.add(card.url);
-                                const priceHit = card.cardText.match(/(?:\$|US\s*\$)\s*[\d,.]+(?:\s*-\s*[\d,.]+)?/);
-                                const moqHit = card.cardText.match(/(\d[\d,]*)\s*(?:pieces?|pcs|sets?|units?)/i);
-                                const priceStr = priceHit ? priceHit[0] : null;
-                                const moqStr = moqHit ? moqHit[0] : null;
-                                results.push({
-                                    productId: extractAlibabaProductId(card.url),
-                                    title: card.title,
-                                    priceRange: priceStr,
-                                    minPrice: parseAlibabaPrice(priceStr),
-                                    moq: moqStr,
-                                    moqNumber: parseAlibabaMoq(moqStr),
-                                    isVerified: /verified/i.test(card.cardText),
-                                    hasTradeAssurance: /trade assurance/i.test(card.cardText),
-                                    thumbnail: card.thumbnail && card.thumbnail.startsWith('//') ? `https:${card.thumbnail}` : card.thumbnail,
-                                    url: card.url,
-                                    scrapedAt: new Date().toISOString(),
-                                });
-                            }
-                        }
-                    }
+                    log.info(`Using browser fallback for Alibaba search: "${keyword}" (HTTP state=${finalState}, len=${httpRes.html?.length || 0})...`);
+                    const pwRes = await fetchWithPlaywright(
+                        searchUrl,
+                        'search',
+                        (res) => extractSearchResultsFromPw(res).length > 0
+                    );
+                    results = extractSearchResultsFromPw(pwRes);
+                    finalState = results.length > 0 ? 'ok' : pwRes.state;
+                    finalReason = results.length > 0 ? 'OK' : pwRes.reason;
                 }
 
                 const sliced = results.slice(0, maxProducts);
@@ -477,8 +528,6 @@ try {
         }
     }
 
-    await closeBrowser();
-
     const summary = {
         totalProductsScraped,
         verifiedSuppliersCount,
@@ -490,16 +539,20 @@ try {
 
     await Actor.setValue('OUTPUT', summary);
     if (totalProductsScraped === 0) {
+        hasFailed = true;
         const lastDiag = diagnostics[diagnostics.length - 1];
         const hint = lastDiag?.reason ? ` Last diagnostic: ${lastDiag.state} (${lastDiag.reason}).` : '';
         await Actor.fail(`Extracted 0 products.${hint} Verify target URLs, keywords, or enable Apify Residential Proxy.`);
     }
     log.info(`Alibaba Scraping finished successfully! Total items: ${totalProductsScraped}`);
 } catch (err) {
+    hasFailed = true;
     log.error(`Fatal execution error: ${err.message}`, { stack: err.stack });
-    await closeBrowser().catch(() => {});
-    await Actor.setValue('OUTPUT', { status: 'FAILED', error: err.message, diagnostics });
+    if (activeBrowser) await activeBrowser.close().catch(() => {});
+    await Actor.setValue('OUTPUT', { status: 'FAILED', error: err.message, diagnostics }).catch(() => {});
     await Actor.fail(err.message);
 } finally {
-    await Actor.exit();
+    if (!hasFailed) {
+        await Actor.exit();
+    }
 }
