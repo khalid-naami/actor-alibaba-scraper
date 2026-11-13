@@ -6,7 +6,7 @@
     "productUrls": {
       "title": "Direct Alibaba Product URLs",
       "type": "array",
-      "description": "List of direct product detail URLs from alibaba.com (if provided, scrapes these product pages directly).",
+      "description": "Full https://www.alibaba.com/product-detail/... URLs only (leave empty to search by keywords; plain words belong in Search Keywords below).",
       "prefill": [],
       "editor": "json"
     },
@@ -42,7 +42,7 @@
     "proxyConfiguration": {
       "title": "Proxy Configuration",
       "type": "object",
-      "description": "Use Apify Residential or Datacenter Proxy to bypass Alibaba anti-scraping protections.",
+      "description": "Alibaba enforces strict WAF/CAPTCHA (punish/baxia) on datacenter IPs. Select Apify RESIDENTIAL Proxy group for reliable production runs.",
       "default": {
         "useApifyProxy": true
       },
