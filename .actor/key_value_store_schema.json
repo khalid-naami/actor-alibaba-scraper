@@ -1,0 +1,13 @@
+{
+  "actorKeyValueStoreSchemaVersion": 1,
+  "title": "Run Diagnostics & Executive Summary",
+  "description": "Structured OUTPUT summary and execution metrics stored in Key-Value Store.",
+  "collections": {
+    "output": {
+      "title": "Executive Summary Payload",
+      "description": "High-level summary report and execution metrics stored in Key-Value store.",
+      "key": "OUTPUT",
+      "contentTypes": ["application/json"]
+    }
+  }
+}
