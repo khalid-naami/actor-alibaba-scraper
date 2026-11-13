@@ -95,20 +95,41 @@ try {
 
     let proxyConfig = null;
     let proxyTransportBlocked = false;
+    let isUnblockerProxy = Array.isArray(proxyConfiguration?.apifyProxyGroups)
+        && proxyConfiguration.apifyProxyGroups.some((g) => /UNBLOCKER/i.test(String(g)));
     if (proxyConfiguration) {
         try {
             proxyConfig = await Actor.createProxyConfiguration(proxyConfiguration);
             if (proxyConfig) {
+                if (Array.isArray(proxyConfig.groups) && proxyConfig.groups.some((g) => /UNBLOCKER/i.test(String(g)))) {
+                    isUnblockerProxy = true;
+                }
                 log.info('Apify Proxy enabled', {
                     groups: proxyConfig.groups || [],
                     countryCode: proxyConfig.countryCode || null,
                     isManInTheMiddle: Boolean(proxyConfig.isManInTheMiddle),
+                    isUnblockerProxy,
                 });
             }
         } catch (proxyErr) {
             log.warning(`Proxy initialization failed (${proxyErr.message}); continuing with direct connection.`);
         }
     }
+
+    const pushDataWithRetry = async (records) => {
+        const cleanBatch = Array.isArray(records) ? records.map(sanitizeRecord).filter(Boolean) : [];
+        if (cleanBatch.length === 0) return;
+        for (let attempt = 1; attempt <= 2; attempt++) {
+            try {
+                await Actor.pushData(cleanBatch);
+                return;
+            } catch (pushErr) {
+                if (attempt === 2) throw pushErr;
+                log.warning(`Transient dataset push error (${pushErr.message}); retrying...`);
+                await new Promise((r) => setTimeout(r, 1500));
+            }
+        }
+    };
 
     const getFreshProxyUrl = async () => {
         if (!proxyConfig || proxyTransportBlocked) return undefined;
@@ -126,11 +147,13 @@ try {
             return { html: '', statusCode: 0, state: 'invalid_url', reason: `Invalid URL: ${url}` };
         }
 
-        const maxAttempts = proxyConfig && !proxyTransportBlocked ? 2 : 1;
+        const requestTimeoutMs = isUnblockerProxy ? 65000 : 25000;
+        const maxAttempts = proxyConfig && !proxyTransportBlocked && !isUnblockerProxy ? 2 : 1;
         let lastRes = { html: '', statusCode: 0, state: 'http_error', reason: 'HTTP request failed' };
 
         for (let attempt = 1; attempt <= maxAttempts; attempt++) {
             const attemptProxyUrl = await getFreshProxyUrl();
+            const usingUnblocker = isUnblockerProxy || /UNBLOCKER/i.test(attemptProxyUrl || '');
             try {
                 const res = await gotScraping({
                     url,
@@ -144,9 +167,11 @@ try {
                         browsers: [{ name: 'chrome' }],
                         operatingSystems: ['windows', 'linux'],
                     },
+                    https: { rejectUnauthorized: false },
+                    http2: !usingUnblocker,
                     sessionToken: {},
-                    retry: { limit: 1 },
-                    timeout: { request: 25000 },
+                    retry: { limit: usingUnblocker ? 0 : 1 },
+                    timeout: { request: usingUnblocker ? 65000 : requestTimeoutMs },
                     throwHttpErrors: false,
                 });
 
@@ -256,7 +281,8 @@ try {
                 }
             });
 
-            const navResp = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 35000 });
+            const gotoTimeoutMs = isUnblockerProxy || /UNBLOCKER/i.test(attemptProxyUrl || '') ? 65000 : 40000;
+            const navResp = await page.goto(url, { waitUntil: 'domcontentloaded', timeout: gotoTimeoutMs });
             const statusCode = navResp ? navResp.status() : 200;
 
             const selector = mode === 'search'
@@ -302,7 +328,7 @@ try {
             return { html: '', statusCode: 0, capturedJsonPayloads: [], domData: { cards: [] }, state: 'invalid_url', reason: `Invalid URL: ${url}` };
         }
 
-        const maxPwAttempts = proxyConfig && !proxyTransportBlocked ? 2 : 1;
+        const maxPwAttempts = proxyConfig && !proxyTransportBlocked && !isUnblockerProxy ? 2 : 1;
         let lastRes = { html: '', statusCode: 0, capturedJsonPayloads: [], domData: { cards: [] }, state: 'browser_error', reason: 'Playwright failed' };
 
         for (let pwAttempt = 1; pwAttempt <= maxPwAttempts; pwAttempt++) {
@@ -403,7 +429,7 @@ try {
     }
 
     if (effectiveProductUrls.length === 0 && keywordSet.size === 0) {
-        keywordSet.add('bamboo cutting board');
+        keywordSet.add('sunglasses');
     }
     const effectiveSearchKeywords = [...keywordSet];
 
@@ -436,7 +462,7 @@ try {
             }
 
             if (product && product.title) {
-                await Actor.pushData(sanitizeRecord(product));
+                await pushDataWithRetry([product]);
                 totalProductsScraped++;
                 if (product.isVerified) verifiedSuppliersCount++;
                 if (product.hasTradeAssurance) tradeAssuranceCount++;
@@ -469,7 +495,7 @@ try {
                 let finalReason = results.length > 0 ? 'OK' : httpRes.reason;
 
                 // Try Alibaba SSR catalog page (/products/<slug>.html) when /trade/search returns an empty SPA shell
-                if (results.length === 0 && !verifiedSupplierOnly && !tradeAssuranceOnly && httpRes.state !== 'antibot_challenge') {
+                if (results.length === 0 && !isUnblockerProxy && !verifiedSupplierOnly && !tradeAssuranceOnly && httpRes.state !== 'antibot_challenge') {
                     const slug = keyword.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
                     if (slug) {
                         const catalogUrl = `https://www.alibaba.com/products/${slug}.html`;
@@ -488,7 +514,7 @@ try {
                 }
 
                 if (results.length === 0) {
-                    log.info(`Using browser fallback for Alibaba search: "${keyword}" (HTTP state=${finalState}, len=${httpRes.html?.length || 0})...`);
+                    log.info(`Using browser fallback for Alibaba search: "${keyword}" (HTTP state=${finalState}, len=${httpRes.html?.length || 0}, reason=${finalReason})...`);
                     const pwRes = await fetchWithPlaywright(
                         searchUrl,
                         'search',
@@ -499,13 +525,14 @@ try {
                     finalReason = results.length > 0 ? 'OK' : pwRes.reason;
                 }
 
-                const sliced = results.slice(0, maxProducts);
-                for (const item of sliced) {
-                    item.searchKeyword = keyword;
-                    await Actor.pushData(sanitizeRecord(item));
-                    totalProductsScraped++;
-                    if (item.isVerified) verifiedSuppliersCount++;
-                    if (item.hasTradeAssurance) tradeAssuranceCount++;
+                const sliced = results.slice(0, maxProducts).map((item) => ({ ...item, searchKeyword: keyword }));
+                if (sliced.length > 0) {
+                    await pushDataWithRetry(sliced);
+                    for (const item of sliced) {
+                        totalProductsScraped++;
+                        if (item.isVerified) verifiedSuppliersCount++;
+                        if (item.hasTradeAssurance) tradeAssuranceCount++;
+                    }
                 }
 
                 diagnostics.push({
