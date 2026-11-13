@@ -43,7 +43,7 @@ export function detectAlibabaPageState(html, statusCode = 200) {
             reason: `HTTP ${statusCode}`,
         };
     }
-    if (!html || typeof html !== 'string' || html.trim().length < 100) {
+    if (!html || typeof html !== 'string' || html.trim().length < 20) {
         return { state: 'empty_body', reason: 'Empty or near-empty HTML response' };
     }
     const lower = html.toLowerCase();
@@ -70,6 +70,9 @@ export function detectAlibabaPageState(html, statusCode = 200) {
             state: 'unavailable',
             reason: pageTitle || 'Product Not Available',
         };
+    }
+    if (html.trim().length < 100) {
+        return { state: 'empty_body', reason: 'Empty or near-empty HTML response' };
     }
     return { state: 'ok', reason: pageTitle || 'OK' };
 }
@@ -543,12 +546,14 @@ export function parseAlibabaSearchHtml(html) {
         results.push(item);
     };
 
-    // Layer 1: Embedded JSON blobs (__page__data, _PAGE_DATA_, __INITIAL_DATA__)
+    // Layer 1: Embedded JSON blobs (__page__data, _PAGE_DATA_, __INITIAL_DATA__, __SEARCH_PAGE_DATA__)
     const embeddedPayloads = [
         extractBalancedJson(html, /window\.__page__data\s*=\s*/i),
         extractBalancedJson(html, /window\._PAGE_DATA_\s*=\s*/i),
         extractBalancedJson(html, /window\.__INITIAL_DATA__\s*=\s*/i),
+        extractBalancedJson(html, /window\.__SEARCH_PAGE_DATA__\s*=\s*/i),
         extractBalancedJson(html, /window\.__SEARCHX_SSE_PREFETCH__\s*=\s*/i),
+        extractBalancedJson(html, /"offerList"\s*:\s*/i),
     ].filter(Boolean);
 
     for (const payload of embeddedPayloads) {
@@ -558,9 +563,37 @@ export function parseAlibabaSearchHtml(html) {
         }
     }
 
+    // Layer 1b: Schema.org ItemList / Product JSON-LD blocks
+    const ldBlocks = parseJsonLdBlocks(html);
+    for (const block of ldBlocks) {
+        const elems = Array.isArray(block?.itemListElement) ? block.itemListElement : [];
+        for (const el of elems) {
+            const itemNode = el?.item && typeof el.item === 'object' ? el.item : el;
+            const rawUrl = itemNode?.url || el?.url;
+            const cleanUrl = normalizeUrl(rawUrl)?.split('?')[0];
+            const title = itemNode?.name ? decodeHtmlEntities(String(itemNode.name)) : null;
+            if (!title || !cleanUrl || !cleanUrl.includes('/product-detail/')) continue;
+            const offerObj = Array.isArray(itemNode?.offers) ? itemNode.offers[0] : itemNode?.offers;
+            const lowPrice = parseAlibabaPrice(offerObj?.lowPrice ?? offerObj?.price);
+            pushUnique({
+                productId: extractAlibabaProductId(cleanUrl),
+                title,
+                priceRange: lowPrice !== null ? `$${lowPrice}` : null,
+                minPrice: lowPrice,
+                moq: null,
+                moqNumber: null,
+                isVerified: false,
+                hasTradeAssurance: false,
+                thumbnail: normalizeUrl(typeof itemNode?.image === 'string' ? itemNode.image : itemNode?.image?.[0]),
+                url: cleanUrl,
+                scrapedAt: new Date().toISOString(),
+            });
+        }
+    }
+
     // Layer 2: Structured product cards in SSR / hydrated HTML
     const cards = [
-        ...html.matchAll(/class="[^"]*(?:fy23-search-card|list-no-v2-outer|organic-gallery-offer|searchx-offer-item|m-gallery-product-item-v2)[^"]*"[\s\S]*?(?=(?:class="[^"]*(?:fy23-search-card|list-no-v2-outer|organic-gallery-offer|searchx-offer-item|m-gallery-product-item-v2)"|$))/gi),
+        ...html.matchAll(/class="[^"]*(?:fy23-search-card|list-no-v2-outer|organic-gallery-offer|searchx-offer-item|m-gallery-product-item-v2|gallery-offer-card|card-info)[^"]*"[\s\S]*?(?=(?:class="[^"]*(?:fy23-search-card|list-no-v2-outer|organic-gallery-offer|searchx-offer-item|m-gallery-product-item-v2|gallery-offer-card|card-info)"|$))/gi),
     ];
 
     for (const c of cards) {
@@ -573,20 +606,24 @@ export function parseAlibabaSearchHtml(html) {
         const productId = extractAlibabaProductId(cleanUrl);
 
         const titleMatch = cardHtml.match(/class="[^"]*(?:search-card-e-title|elements-title-normal__outter|searchx-product-title)[^"]*"[^>]*>([\s\S]*?)<\/(?:h2|span|a)>/i) ||
-                           cardHtml.match(/title="([^"]{10,})"/i);
+                           cardHtml.match(/title="([^"]{10,})"/i) ||
+                           cardHtml.match(/alt="([^"]{10,})"/i);
         const title = titleMatch ? decodeHtmlEntities(titleMatch[1].replace(/<[^>]+>/g, '')) : null;
         if (!title) continue;
 
-        const priceMatch = cardHtml.match(/class="[^"]*(?:search-card-e-price-main|elements-offer-price-normal__price|searchx-price)[^"]*"[^>]*>([\s\S]*?)<\/(?:span|div)>/i);
-        const priceStr = priceMatch ? decodeHtmlEntities(priceMatch[1].replace(/<[^>]+>/g, '')) : null;
+        const priceMatch = cardHtml.match(/class="[^"]*(?:search-card-e-price-main|elements-offer-price-normal__price|searchx-price)[^"]*"[^>]*>([\s\S]*?)<\/(?:span|div)>/i) ||
+                           cardHtml.match(/(?:US\s*\$|\$)[\d,.]+(?:\s*-\s*[\d,.]+)?/i);
+        const priceStr = priceMatch ? decodeHtmlEntities((priceMatch[1] || priceMatch[0]).replace(/<[^>]+>/g, '')) : null;
 
-        const moqMatch = cardHtml.match(/class="[^"]*(?:search-card-e-num|element-offer-minorder-normal__value|searchx-moq)[^"]*"[^>]*>([\s\S]*?)<\/(?:span|div)>/i);
+        const moqMatch = cardHtml.match(/class="[^"]*(?:search-card-e-num|element-offer-minorder-normal__value|searchx-moq)[^"]*"[^>]*>([\s\S]*?)<\/(?:span|div)>/i) ||
+                         cardHtml.match(/(\d[\d,]*\s*(?:pieces?|pcs|sets?|units?))/i);
         const moqStr = moqMatch ? decodeHtmlEntities(moqMatch[1].replace(/<[^>]+>/g, '')) : null;
 
-        const isVerified = cardHtml.includes('verified-icon') || cardHtml.includes('Verified');
-        const hasTradeAssurance = cardHtml.includes('ta-icon') || cardHtml.includes('Trade Assurance');
+        const isVerified = /verified/i.test(cardHtml);
+        const hasTradeAssurance = /trade[- ]assurance|ta-icon/i.test(cardHtml);
 
-        const imgMatch = cardHtml.match(/class="[^"]*(?:search-card-e-slider__img|searchx-img|image)[^"]*"[^>]*src="([^"]+)"/i);
+        const imgMatch = cardHtml.match(/class="[^"]*(?:search-card-e-slider__img|searchx-img|image)[^"]*"[^>]*src="([^"]+)"/i) ||
+                         cardHtml.match(/<img[^>]*src="([^"]+)"/i);
         const thumbnail = normalizeUrl(imgMatch ? imgMatch[1] : null);
 
         pushUnique({
@@ -602,6 +639,32 @@ export function parseAlibabaSearchHtml(html) {
             url: cleanUrl,
             scrapedAt: new Date().toISOString(),
         });
+    }
+
+    // Layer 3: Anchor fallback for SSR catalog pages (e.g., /products/*.html)
+    if (results.length === 0) {
+        const anchorRegex = /<a[^>]*href="([^"]*\/product-detail\/[^"]+?_\d{8,}\.html[^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
+        for (const m of html.matchAll(anchorRegex)) {
+            const cleanUrl = normalizeUrl(m[1])?.split('?')[0];
+            const productId = extractAlibabaProductId(cleanUrl);
+            const titleAttr = m[0].match(/title="([^"]{12,})"/i)?.[1] || m[0].match(/alt="([^"]{12,})"/i)?.[1];
+            const innerTitle = m[2].replace(/<[^>]+>/g, ' ').trim();
+            const title = decodeHtmlEntities(titleAttr || innerTitle);
+            if (!productId || !title || title.length < 12) continue;
+            pushUnique({
+                productId,
+                title,
+                priceRange: null,
+                minPrice: null,
+                moq: null,
+                moqNumber: null,
+                isVerified: false,
+                hasTradeAssurance: false,
+                thumbnail: null,
+                url: cleanUrl,
+                scrapedAt: new Date().toISOString(),
+            });
+        }
     }
 
     return results;
